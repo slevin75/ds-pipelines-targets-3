@@ -3,6 +3,7 @@ library(targets)
 library(tarchetypes)
 library(tidyverse)
 library(lubridate)
+library(retry)
 suppressPackageStartupMessages(library(dplyr))
 
 options(tidyverse.quiet = TRUE)
@@ -20,30 +21,30 @@ source("3_visualize/src/plot_data_coverage.R")
 source("3_visualize/src/map_timeseries.R")
 
 # Configuration
-states <- c('WI','MN','MI','IL','IN')
-parameter <- c('00060')
+states <- c('AL','AZ','AR','CA','CO','CT','DE','DC','FL','GA','ID','IL','IN','IA',
+            'KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH',
+            'NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX',
+            'UT','VA','WA','WV','WI','WY','AK','HI','PR')
+parameter <- c('00010')
 
-mapped_by_state_targets<- tar_map(
-  values = tibble(state_abb = states) %>%
-    mutate(state_plot_files = sprintf("3_visualize/out/timeseries_%s.png", state_abb)),
-  names=state_abb,
-  tar_target(nwis_inventory,subset_sites(oldest_active_sites,state_abb)),
-  tar_target(nwis_data, get_site_data(nwis_inventory, state_abb, parameter)),
-  tar_target(tally,tally_site_obs(nwis_data)),
-  tar_target(timeseries_png,plot_site_data(state_plot_files,nwis_data,parameter),format="file"),
-  unlist=FALSE
-)
 
 # Targets
 list(
   # Identify oldest sites
   tar_target(oldest_active_sites, find_oldest_sites(states, parameter)),
 
-  mapped_by_state_targets,
+  tar_target(nwis_inventory,
+             oldest_active_sites %>%
+               group_by(state_cd) %>%
+               tar_group(),
+             iteration="group"),
 
-  tar_combine(obs_tallies,mapped_by_state_targets[[3]],command=combine_obs_tallies(!!!.x)),
+  tar_target(nwis_data, retry(get_site_data(nwis_inventory, nwis_inventory$state_cd, parameter),when="Ugh, the internet data transfer failed!",max_tries=30),
+             pattern=map(nwis_inventory)),
+  tar_target(tally,tally_site_obs(nwis_data),pattern=map(nwis_data)),
 
-  tar_target(plot_data_coverage_png,plot_data_coverage(obs_tallies,"3_visualize/out/data_coverage.png",parameter),
+
+  tar_target(plot_data_coverage_png,plot_data_coverage(tally,"3_visualize/out/data_coverage.png",parameter),
              format="file"),
   # Map oldest sites
   tar_target(
@@ -51,12 +52,17 @@ list(
     map_sites("3_visualize/out/site_map.png", oldest_active_sites),
     format = "file"
   ),
-  tar_combine(
+
+  tar_target(timeseries_png,
+             plot_site_data(sprintf("3_visualize/out/timeseries_%s.png", unique(nwis_data$State)),nwis_data,parameter),
+             format="file",
+             pattern=map(nwis_data)),
+  tar_target(
     summary_state_timeseries_csv,
-    mapped_by_state_targets[[4]],
-    command=summarize_targets('3_visualize/log/summary_state_timeseries.csv',!!!.x),
+    command=summarize_targets('3_visualize/log/summary_state_timeseries.csv',names(timeseries_png)),
     format="file"
   ),
+
   tar_target(map_timeseries_html,
              map_timeseries(oldest_active_sites,summary_state_timeseries_csv,'3_visualize/out/timeseries_map.html'),
              format="file"
